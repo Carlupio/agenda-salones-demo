@@ -1,0 +1,819 @@
+{
+  "name": "Salones - Bot",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "messages"
+        ],
+        "options": {}
+      },
+      "type": "n8n-nodes-base.whatsAppTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1280,
+        -64
+      ],
+      "id": "e219a4a6-5512-40ee-972e-8c901218af94",
+      "name": "Salones - Bot",
+      "credentials": {
+        "whatsAppTriggerApi": {
+          "id": "TU_ID_CREDENCIAL",
+          "name": "TU_CREDENCIAL_WHATSAPP_TRIGGER"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Convierte cualquier mensaje de WhatsApp en un formato simple y único.\n// Ignora los eventos de estado (enviado, entregado, leído).\n// Ignora mensajes viejos (reenvíos tardíos de Meta):\n//   - taps de botones/listas y audios: más de 10 minutos\n//   - textos y otros: más de 1 hora\nconst MAX_EDAD_OPCION = 10 * 60;\nconst MAX_EDAD_TEXTO = 60 * 60;\nconst ahora = Math.floor(Date.now() / 1000);\nconst salida = [];\n\nfor (const item of $input.all()) {\n  const raw = item.json;\n  // Soporta el formato del trigger y el payload completo de Meta\n  const value = raw.entry?.[0]?.changes?.[0]?.value ?? raw;\n\n  const m = value.messages?.[0];\n  if (!m) continue;\n\n  let tipo = 'otro';\n  let texto = '';\n  let respuesta_id = null;\n  let audio_id = null;\n\n  if (m.type === 'text') {\n    tipo = 'texto';\n    texto = (m.text?.body ?? '').trim();\n  } else if (m.type === 'interactive') {\n    // Respuesta a botones o a listas\n    const r = m.interactive?.button_reply ?? m.interactive?.list_reply;\n    tipo = 'opcion';\n    respuesta_id = r?.id ?? null;\n    texto = r?.title ?? '';\n  } else if (m.type === 'button') {\n    // Botón de una plantilla (recordatorio, seguimientos)\n    tipo = 'opcion';\n    respuesta_id = m.button?.payload ?? null;\n    texto = m.button?.text ?? '';\n  } else if (m.type === 'audio') {\n    // Nota de voz: se transcribe más adelante\n    tipo = 'audio';\n    audio_id = m.audio?.id ?? null;\n  }\n\n  // Hora original del mensaje (segundos). Si no viene, no se filtra.\n  const enviado = Number(m.timestamp);\n  const edad_seg = Number.isFinite(enviado) ? ahora - enviado : 0;\n\n  // Mensaje viejo: responde a algo que ya pasó, se descarta.\n  const limite = (tipo === 'opcion' || tipo === 'audio') ? MAX_EDAD_OPCION : MAX_EDAD_TEXTO;\n  if (edad_seg > limite) continue;\n\n  salida.push({\n    json: {\n      phone_number_id: value.metadata?.phone_number_id,\n      telefono: m.from,\n      nombre_perfil: value.contacts?.[0]?.profile?.name ?? null,\n      mensaje_id: m.id,\n      tipo,\n      texto,\n      respuesta_id,\n      audio_id,\n      edad_seg,\n    },\n  });\n}\n\nreturn salida;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1056,
+        -64
+      ],
+      "id": "e0b98144-c55b-433f-a33d-8fd28cb37d21",
+      "name": "Normalizar"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://TU_PROYECTO.supabase.co/rest/v1/rpc/bot_contexto",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_phone_number_id: $json.phone_number_id, p_telefono: $json.telefono }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -128,
+        -80
+      ],
+      "id": "bf809dd5-e0f2-4d0d-9b94-7230ec493a18",
+      "name": "Contexto",
+      "retryOnFail": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "TU_ID_CREDENCIAL",
+          "name": "TU_CREDENCIAL_SUPABASE"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d5d0d871-5893-4dfd-96de-616259a8bc8f",
+              "leftValue": "={{ $json.bot_pausado }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        320,
+        -80
+      ],
+      "id": "cd48bcca-b0fc-479c-b770-62b29a7d28e9",
+      "name": "¿Bot pausado?"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ROUTER: decide qué hacer según el paso de la conversación\n// y lo que respondió el cliente. No envía nada, solo decide.\nconst ctx = $('Contexto').first().json;          // contexto de la conversación\nconst msgBase = $('Normalizar').first().json;    // mensaje del cliente\n\n// Si llegó un audio, se usa la opción que eligió \"Interpretar audio\"\nconst audio = $('Interpretar audio').isExecuted ? $('Interpretar audio').first().json : null;\nconst msg = audio\n  ? { ...msgBase, respuesta_id: audio.respuesta_id, texto: audio.texto, tipo: audio.respuesta_id ? 'opcion' : 'audio' }\n  : msgBase;\n\nconst phone = msg.phone_number_id;\nconst tel = msg.telefono;\nconst id = msg.respuesta_id ?? '';\nconst textoPlano = (msg.texto ?? '').toLowerCase().trim();\nconst tz = ctx.zona_horaria || 'America/Bogota';\n\nlet datos = { ...(ctx.datos ?? {}) };\nlet accion = null;\nlet aviso = null;\n\nconst PALABRAS_MENU = ['hola', 'menu', 'menú', 'inicio', 'buenas', 'buenos dias',\n  'buenos días', 'buenas tardes', 'buenas noches'];\n\n// Link/QR por profesional: saludo + más palabras (\"Hola Santos\").\n// La base decide si alguna palabra es el nombre de una profesional.\nconst saludoConNombre = msg.tipo === 'texto'\n  && !PALABRAS_MENU.includes(textoPlano)\n  && /^(hola|buenas|buenos)\\b/.test(textoPlano)\n  && textoPlano.split(/\\s+/).length >= 2;\n\n// Qué pregunta repetir si el cliente responde algo que no corresponde\nconst REPETIR = {\n  inicio: 'menu',\n  autorizacion: 'pedir_autorizacion',\n  menu: 'menu',\n  categoria: 'listar_servicios',\n  servicio: 'listar_servicios',\n  profesional: 'listar_profesionales',\n  dia: 'listar_dias',\n  franja: 'pedir_franja',\n  hora: 'listar_horas',\n  confirmar: 'resumen',\n  cita: 'mis_citas',\n  cita_opcion: 'opciones_cita',\n  cancelar: 'confirmar_cancelacion',\n};\n\n// 1) Sin autorización de datos: solo puede aceptar o no\n//    Si llegó por el link de una profesional, se busca ya y se conserva para después de aceptar\nif (!ctx.autorizo_datos) {\n  if (id === 'auth_si') { datos = datos.profesional_fijo ? datos : {}; accion = 'registrar'; }\n  else if (id === 'auth_no') { datos = {}; accion = 'sin_autorizacion'; }\n  else if (saludoConNombre) { datos = { modo: 'agendar', texto_link: msg.texto }; accion = 'autorizacion_link'; }\n  else accion = 'pedir_autorizacion';\n}\n// 2) Botones del recordatorio (sirven en cualquier paso)\nelse if (id.startsWith('rec_ok:')) {\n  datos = { cita_id: id.split(':')[1] };\n  accion = 'confirmar_asistencia';\n}\nelse if (id.startsWith('rec_cancel:')) {\n  datos = { cita_id: id.split(':')[1] };\n  accion = 'confirmar_cancelacion';\n}\n// 3) Botones de seguimiento (sirven en cualquier paso)\n//    seg_cont:<servicio>|<profesional|any>|<nombre servicio>  → abandono\n//    seg_reprog:<servicio>|<profesional>|<nombre servicio>    → cancelada / no asistió\nelse if (id.startsWith('seg_cont:') || id.startsWith('seg_reprog:')) {\n  const [srv, pro, srvNombre] = id.slice(id.indexOf(':') + 1).split('|');\n  if (srv) {\n    datos = {\n      modo: 'agendar',\n      servicio_id: srv,\n      profesional_id: pro && pro !== 'any' ? pro : null,\n      ...(srvNombre ? { servicio_nombre: srvNombre } : {}),\n    };\n    accion = 'listar_dias';\n  } else {\n    datos = { modo: 'agendar' };\n    accion = 'listar_servicios';\n  }\n  aviso = id.startsWith('seg_cont:') ? '¡Listo! Retomemos tu cita 🙌' : 'Busquemos una nueva fecha 📅';\n}\nelse if (id === 'seg_no') {\n  datos = {};\n  accion = 'seg_no';\n}\n// 4) Link/QR por profesional: busca a la profesional y muestra solo sus servicios\n//    (si no hay coincidencia, Construir respuesta muestra el menú)\nelse if (saludoConNombre) {\n  datos = { modo: 'agendar', texto_link: msg.texto };\n  accion = 'link_profesional';\n}\n// 5) Saludo o \"menú\" escrito: vuelve al menú\nelse if (msg.tipo === 'texto' && PALABRAS_MENU.includes(textoPlano)) {\n  datos = {};\n  accion = 'menu';\n}\n// 6) Máquina de estados\nelse {\n  switch (ctx.paso) {\n    case 'menu':\n      if (id === 'menu_agendar') { datos = { modo: 'agendar' }; accion = 'listar_servicios'; }\n      else if (id === 'menu_citas') { datos = {}; accion = 'mis_citas'; }\n      else if (id === 'menu_humano') accion = 'humano';\n      // Botones que se muestran después de aceptar datos cuando llegó por el link\n      else if (id === 'link_si' && datos.texto_link) accion = 'link_profesional';\n      else if (id === 'menu_ver') { datos = {}; accion = 'menu'; }\n      break;\n\n    case 'categoria':\n      // Más de 10 servicios: primero se elige la categoría\n      if (id.startsWith('cat:')) {\n        datos.categoria = id.slice(4);\n        accion = 'listar_servicios';\n      }\n      break;\n\n    case 'servicio':\n      if (id === 'cat:*') {\n        // \"Otras categorías\": vuelve a la lista de categorías\n        delete datos.categoria;\n        accion = 'listar_servicios';\n      } else if (id.startsWith('srv:')) {\n        datos.servicio_id = id.slice(4);\n        datos.servicio_nombre = msg.texto;\n        // Si llegó por el link de una profesional, ya está elegida: salta a los días\n        accion = datos.profesional_fijo ? 'listar_dias' : 'listar_profesionales';\n      }\n      break;\n\n    case 'profesional':\n      if (id.startsWith('pro:')) {\n        const p = id.slice(4);\n        datos.profesional_id = p === 'any' ? null : p;\n        datos.profesional_nombre = p === 'any' ? null : msg.texto;\n        accion = 'listar_dias';\n      }\n      break;\n\n    case 'dia':\n      if (id.startsWith('dia:')) {\n        datos.fecha = id.slice(4);\n        datos.fecha_texto = msg.texto;\n        const ahora = DateTime.now().setZone(tz);\n        if (datos.fecha === ahora.toISODate() && ahora.hour >= 16) {\n          // Hoy y ya pasaron las 4 p. m.: solo queda la tarde\n          datos.franja = 'tarde';\n          accion = 'listar_horas';\n          aviso = 'Para hoy quedan horas en la tarde 🌇';\n        } else {\n          accion = 'pedir_franja';\n        }\n      }\n      break;\n\n    case 'franja':\n      if (id.startsWith('fr:')) {\n        datos.franja = id.slice(3);\n        accion = 'listar_horas';\n      }\n      break;\n\n    case 'hora':\n      if (id.startsWith('hora:')) {\n        datos.inicio = id.slice(5);\n        datos.hora_texto = msg.texto;\n        accion = 'resumen';\n      }\n      break;\n\n    case 'confirmar':\n      if (id === 'conf_si') accion = datos.modo === 'reprogramar' ? 'reprogramar_cita' : 'crear_cita';\n      else if (id === 'conf_cambiar') accion = 'listar_dias';\n      break;\n\n    case 'cita':\n      if (id.startsWith('cita:')) {\n        const [citaId, servicioId, profesionalId] = id.slice(5).split('|');\n        datos = { cita_id: citaId, servicio_id: servicioId, profesional_id: profesionalId, cita_texto: msg.texto };\n        accion = 'opciones_cita';\n      }\n      break;\n\n    case 'cita_opcion':\n      if (id === 'cita_reprog') { datos.modo = 'reprogramar'; accion = 'listar_dias'; }\n      else if (id === 'cita_cancel') accion = 'confirmar_cancelacion';\n      else if (id === 'volver') { datos = {}; accion = 'menu'; }\n      break;\n\n    case 'cancelar':\n      if (id === 'cancel_si') accion = 'cancelar_cita';\n      else if (id === 'cancel_no') { datos = {}; accion = 'menu'; }\n      break;\n\n    default:\n      datos = {};\n      accion = 'menu';\n  }\n\n  if (!accion) {\n    // Si llegó por el link, repite solo los servicios de esa profesional\n    accion = ctx.paso === 'servicio' && datos.profesional_fijo && datos.texto_link\n      ? 'link_profesional'\n      : (REPETIR[ctx.paso] ?? 'menu');\n    if (audio && audio.motivo === 'largo') {\n      aviso = 'Tu audio es muy largo 🙏 Envíame uno de menos de 1 minuto o elige una opción 👇';\n    } else if (audio) {\n      aviso = 'No te entendí bien el audio 🙏 Elige una de las opciones 👇';\n    } else {\n      aviso = 'Por favor elige una de las opciones 👇';\n    }\n  }\n}\n\n// Qué función de Supabase necesita cada acción (null = ninguna)\nconst RPC = {\n  registrar:            ['bot_registrar_cliente',    { p_telefono: tel, p_nombre: msg.nombre_perfil, p_acepta_datos: true }],\n  listar_servicios:     ['bot_servicios',            { p_categoria: datos.categoria ?? null }],\n  link_profesional:     ['bot_servicios_profesional', { p_texto: datos.texto_link ?? msg.texto }],\n  autorizacion_link:    ['bot_servicios_profesional', { p_texto: datos.texto_link }],\n  listar_profesionales: ['bot_profesionales',        { p_servicio: datos.servicio_id }],\n  listar_dias:          ['bot_dias_disponibles',     { p_servicio: datos.servicio_id, p_profesional: datos.profesional_id ?? null }],\n  listar_horas:         ['bot_horas',                { p_servicio: datos.servicio_id, p_fecha: datos.fecha, p_franja: datos.franja, p_profesional: datos.profesional_id ?? null }],\n  crear_cita:           ['bot_crear_cita',           { p_telefono: tel, p_servicio: datos.servicio_id, p_inicio: datos.inicio, p_profesional: datos.profesional_id ?? null }],\n  reprogramar_cita:     ['bot_reprogramar_cita',     { p_telefono: tel, p_cita: datos.cita_id, p_nuevo_inicio: datos.inicio, p_profesional: datos.profesional_id ?? null }],\n  mis_citas:            ['bot_mis_citas',            { p_telefono: tel }],\n  cancelar_cita:        ['bot_cancelar_cita',        { p_telefono: tel, p_cita: datos.cita_id }],\n  confirmar_asistencia: ['bot_confirmar_asistencia', { p_telefono: tel, p_cita: datos.cita_id }],\n  humano:               ['bot_pausar',               { p_telefono: tel, p_pausado: true }],\n};\n\nconst [rpc, extra] = RPC[accion] ?? [null, null];\n\nreturn [{\n  json: {\n    accion,\n    aviso,\n    datos,\n    rpc,\n    body: rpc ? { p_phone_number_id: phone, ...extra } : null,\n    phone_number_id: phone,\n    telefono: tel,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        -64
+      ],
+      "id": "fb24b66c-a4cd-4a70-8c3d-1c607cda9eff",
+      "name": "Router"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "592c9f8f-2a14-4bbd-8d6a-4b749139860a",
+              "leftValue": "={{ !!$json.rpc }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        912,
+        -64
+      ],
+      "id": "e8b8b882-ba56-4b70-93a0-4208d3c63f82",
+      "name": "¿Necesita datos?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://TU_PROYECTO.supabase.co/rest/v1/rpc/{{ $json.rpc }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1136,
+        -240
+      ],
+      "id": "e37e6fb5-3e39-4862-851e-010fd8b9aa15",
+      "name": "Llamar Supabase",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "TU_ID_CREDENCIAL",
+          "name": "TU_CREDENCIAL_SUPABASE"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// CONSTRUIR RESPUESTA: arma los mensajes de WhatsApp según la acción\n// y el resultado de Supabase. Define el siguiente paso de la conversación.\nconst r   = $('Router').first().json;\nconst ctx = $('Contexto').first().json;\nconst tz  = ctx.zona_horaria || 'America/Bogota';\nconst tel = r.telefono;\nconst d   = { ...(r.datos ?? {}) };\ndelete d.opciones; // se recalculan al final con lo que se envía ahora\n\n// ---------- Resultado de Supabase (solo si se llamó) ----------\nconst http = $input.first().json;\nconst huboHttp = http.statusCode !== undefined;\nlet cuerpo = http.body;\nif (typeof cuerpo === 'string') { try { cuerpo = JSON.parse(cuerpo); } catch (e) {} }\nconst ok = huboHttp && http.statusCode < 300;\nconst filas = ok ? (Array.isArray(cuerpo) ? cuerpo : [cuerpo]).filter(x => x !== null && x !== undefined) : [];\nconst error = huboHttp && !ok ? (cuerpo?.message ?? 'ERROR') : null;\n\n// ---------- Utilidades ----------\nconst cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);\nconst dt = (iso) => DateTime.fromISO(iso, { zone: tz }).setLocale('es');\nconst fmtFecha = (iso) => cap(dt(iso).toFormat(\"cccc d 'de' LLLL\"));\nconst fmtHora = (iso) => dt(iso).toFormat('h:mm a');\nconst pesos = (n) => '$' + Number(n).toLocaleString('es-CO', { maximumFractionDigits: 0 });\nconst conAviso = (t) => (r.aviso ? `${r.aviso}\\n\\n${t}` : t);\n\nconst nombre = ctx.cliente_nombre || $('Normalizar').first().json.nombre_perfil || '';\nconst saludo = nombre ? ` ${nombre.split(' ')[0]}` : '';\n\n// ---------- Textos según el tipo de negocio (salones.tipo) ----------\n// 'estetica' deja los mensajes exactamente como estaban.\nconst T = {\n  estetica: {\n    lugar: 'salón',\n    icoServicio: '💅',\n    icoPro: '👩',\n    preguntaPro: '¿Con quién quieres tu cita? 👩',\n    botonPro: 'Ver profesionales',\n    cualquieraDesc: 'La primera con cupo',\n    mismaPro: 'La misma profesional',\n    primeraDisp: 'La primera disponible',\n    despedida: '¡Te esperamos! 💖',\n    notaDatos: '',\n  },\n  odontologia: {\n    lugar: 'consultorio',\n    icoServicio: '🦷',\n    icoPro: '🧑‍⚕️',\n    preguntaPro: '¿Con qué odontólogo(a) quieres tu cita? 🧑‍⚕️',\n    botonPro: 'Ver odontólogos',\n    cualquieraDesc: 'Quien tenga cupo primero',\n    mismaPro: 'El mismo odontólogo(a)',\n    primeraDisp: 'Quien tenga cupo primero',\n    despedida: '¡Te esperamos! 😊',\n    notaDatos: ' No te pediremos información sobre tu salud.',\n  },\n}[ctx.salon_tipo === 'odontologia' ? 'odontologia' : 'estetica'];\n\n// ---------- Formatos de WhatsApp ----------\nconst texto = (body) => ({ type: 'text', text: { body } });\n\nconst botones = (body, opciones) => ({\n  type: 'interactive',\n  interactive: {\n    type: 'button',\n    body: { text: body },\n    action: {\n      buttons: opciones.map(([id, title]) => ({ type: 'reply', reply: { id, title: title.slice(0, 20) } })),\n    },\n  },\n});\n\nconst lista = (body, boton, items) => ({\n  type: 'interactive',\n  interactive: {\n    type: 'list',\n    body: { text: body },\n    action: {\n      button: boton.slice(0, 20),\n      sections: [{\n        title: 'Opciones',\n        rows: items.slice(0, 10).map(f => ({\n          id: f.id,\n          title: f.title.slice(0, 24),\n          ...(f.description ? { description: f.description.slice(0, 72) } : {}),\n        })),\n      }],\n    },\n  },\n});\n\nconst OPC_MENU = [['menu_agendar', 'Agendar cita'], ['menu_citas', 'Mis citas'], ['menu_humano', 'Hablar con alguien']];\n\n// Franjas: [id, texto del botón, hora en que termina]\nconst FRANJAS = [['fr:manana', 'Mañana ☀️', 12], ['fr:mediodia', 'Mediodía 🌤️', 16], ['fr:tarde', 'Tarde 🌇', 24]];\nconst NOMBRE_FRANJA = { manana: 'mañana', mediodia: 'mediodía', tarde: 'tarde' };\n// Si el día es hoy, oculta las franjas que ya terminaron\nconst opcFranja = (fecha) => {\n  const ahora = DateTime.now().setZone(tz);\n  const esHoy = fecha === ahora.toISODate();\n  return FRANJAS.filter(([, , fin]) => !esHoy || ahora.hour < fin).map(([id, t]) => [id, t]);\n};\n\nconst ERROR_GENERICO = 'Tuvimos un problema técnico 🙏 Intenta de nuevo en unos minutos escribiendo *Hola*.';\n\n// Acciones que interpretan el error ellas mismas\nconst MANEJAN_ERROR = ['crear_cita', 'reprogramar_cita', 'cancelar_cita', 'confirmar_asistencia', 'autorizacion_link'];\n\nlet mensajes = [];   // para el cliente\nlet avisos = [];     // para otros números (ej. el salón)\nlet paso = 'inicio';\nlet datos = {};\n\nif (huboHttp && !ok && !MANEJAN_ERROR.includes(r.accion)) {\n  mensajes.push(texto(ERROR_GENERICO));\n} else {\n  switch (r.accion) {\n\n    case 'autorizacion_link':\n      // Llegó por el link de una profesional y aún no autoriza datos: se guarda la profesional\n      if (filas.length) {\n        d.profesional_id = filas[0].profesional_id;\n        d.profesional_nombre = filas[0].profesional_nombre;\n        d.profesional_fijo = true;\n      }\n      // sigue igual que pedir_autorizacion\n    case 'pedir_autorizacion':\n      mensajes.push(botones(conAviso(\n        `¡Hola${saludo}! 👋 Bienvenido(a) a *${ctx.salon_nombre}*.\\n\\n` +\n        `Para agendar por este medio necesitamos tu autorización para tratar tus datos ` +\n        `(nombre y teléfono) solo para gestionar tus citas y enviarte recordatorios, ` +\n        `según la Ley 1581 de 2012.${T.notaDatos}\\n\\n¿Nos autorizas?`),\n        [['auth_si', 'Acepto'], ['auth_no', 'No acepto']]));\n      paso = 'autorizacion';\n      if (d.profesional_fijo) datos = d; // conserva la profesional del link\n      break;\n\n    case 'sin_autorizacion':\n      mensajes.push(texto('Entendido. Sin tu autorización no podemos agendar por este medio.\\n\\nSi cambias de opinión, escríbenos *Hola*.'));\n      break;\n\n    case 'registrar':\n      if (d.profesional_fijo) {\n        const primer = d.profesional_nombre.split(' ')[0];\n        mensajes.push(botones(`¡Gracias${saludo}! ✅\\n\\n¿Agendamos con *${primer}*?`,\n          [['link_si', `Agendar con ${primer}`], ['menu_ver', 'Ver menú']]));\n        paso = 'menu'; datos = d;\n      } else {\n        mensajes.push(botones(`¡Gracias${saludo}! ✅\\n\\n¿Qué quieres hacer?`, OPC_MENU));\n        paso = 'menu';\n      }\n      break;\n\n    case 'menu':\n      mensajes.push(botones(conAviso(`¡Hola${saludo}! ¿Qué quieres hacer?`), OPC_MENU));\n      paso = 'menu';\n      break;\n\n    case 'listar_servicios':\n      if (!filas.length) {\n        mensajes.push(texto('Por ahora no hay servicios disponibles. Escribe *Hola* para volver al menú.'));\n      } else if (filas[0].tipo === 'categoria') {\n        // Más de 10 servicios: primero las categorías\n        delete d.categoria;\n        mensajes.push(lista(conAviso(`¿Qué tipo de servicio buscas? ${T.icoServicio}`), 'Ver categorías',\n          filas.map(c => ({ id: `cat:${c.nombre}`, title: c.nombre, description: `${c.cantidad} ${c.cantidad === 1 ? 'servicio' : 'servicios'}` }))));\n        paso = 'categoria'; datos = d;\n      } else {\n        const filasSrv = filas.map(s => ({ id: `srv:${s.servicio_id}`, title: s.nombre, description: `${s.duracion_min} min · ${pesos(s.precio)}` }));\n        // Dentro de una categoría: máximo 9 servicios + \"Otras categorías\"\n        const items = d.categoria\n          ? [...filasSrv.slice(0, 9), { id: 'cat:*', title: '⬅️ Otras categorías' }]\n          : filasSrv;\n        const titulo = d.categoria ? `*${d.categoria}*\\n\\n¿Qué servicio quieres? ${T.icoServicio}` : `¿Qué servicio quieres? ${T.icoServicio}`;\n        mensajes.push(lista(conAviso(titulo), 'Ver servicios', items));\n        paso = 'servicio'; datos = d;\n      }\n      break;\n\n    case 'link_profesional':\n      if (!filas.length) {\n        // Ninguna profesional coincide: menú normal\n        mensajes.push(botones(`¡Hola${saludo}! ¿Qué quieres hacer?`, OPC_MENU));\n        paso = 'menu';\n      } else {\n        const pro = filas[0];\n        d.profesional_id = pro.profesional_id;\n        d.profesional_nombre = pro.profesional_nombre;\n        d.profesional_fijo = true;\n        mensajes.push(lista(conAviso(\n          `¡Hola${saludo}! 👋 Vas a agendar con *${pro.profesional_nombre.split(' ')[0]}*.\\n\\n¿Qué servicio quieres? ${T.icoServicio}`),\n          'Ver servicios',\n          filas.map(s => ({ id: `srv:${s.servicio_id}`, title: s.nombre, description: `${s.duracion_min} min · ${pesos(s.precio)}` }))));\n        paso = 'servicio'; datos = d;\n      }\n      break;\n\n    case 'listar_profesionales':\n      mensajes.push(lista(conAviso(T.preguntaPro), T.botonPro, [\n        { id: 'pro:any', title: 'Cualquiera disponible', description: T.cualquieraDesc },\n        ...filas.map(p => ({ id: `pro:${p.profesional_id}`, title: p.nombre })),\n      ]));\n      paso = 'profesional'; datos = d;\n      break;\n\n    case 'listar_dias':\n      if (!filas.length) {\n        mensajes.push(botones(`😕 No hay cupos en los próximos días${d.profesional_nombre ? ' con ' + d.profesional_nombre : ''}.\\n\\n¿Qué quieres hacer?`, OPC_MENU));\n        paso = 'menu';\n      } else {\n        const hoy = DateTime.now().setZone(tz).startOf('day');\n        mensajes.push(lista(conAviso('¿Qué día te queda bien? 📅'), 'Ver días',\n          filas.map(f => {\n            const dia = dt(f.fecha);\n            const diff = Math.round(dia.startOf('day').diff(hoy, 'days').days);\n            const etiqueta = diff === 0 ? 'Hoy · ' : diff === 1 ? 'Mañana · ' : '';\n            return { id: `dia:${f.fecha}`, title: cap(dia.toFormat('cccc d')), description: etiqueta + dia.toFormat('LLLL') };\n          })));\n        delete d.inicio;\n        paso = 'dia'; datos = d;\n      }\n      break;\n\n    case 'pedir_franja':\n      mensajes.push(botones(conAviso(`¿Qué franja prefieres para el *${d.fecha_texto}*?`), opcFranja(d.fecha)));\n      paso = 'franja'; datos = d;\n      break;\n\n    case 'listar_horas':\n      if (!filas.length) {\n        const otras = opcFranja(d.fecha).filter(([fid]) => fid !== `fr:${d.franja}`);\n        if (otras.length) {\n          mensajes.push(botones(`😕 No quedan horas libres en la ${NOMBRE_FRANJA[d.franja] ?? 'franja'} del *${d.fecha_texto}*.\\n\\n¿Probamos otra franja?`, otras));\n          paso = 'franja';\n        } else {\n          mensajes.push(botones(`😕 No quedan horas libres el *${d.fecha_texto}*.\\n\\n¿Qué quieres hacer?`, OPC_MENU));\n          paso = 'menu';\n        }\n      } else {\n        mensajes.push(lista(conAviso('¿A qué hora? 🕐'), 'Ver horas',\n          filas.map(f => ({ id: `hora:${f.inicio}`, title: fmtHora(f.inicio) }))));\n        paso = 'hora';\n      }\n      datos = d;\n      break;\n\n    case 'resumen': {\n      const titulo = d.modo === 'reprogramar' ? '🔄 *Nueva fecha para tu cita*' : '📋 *Resumen de tu cita*';\n      const quien = d.profesional_nombre ?? (d.profesional_id ? T.mismaPro : T.primeraDisp);\n      mensajes.push(botones(conAviso(\n        `${titulo}\\n\\n` +\n        (d.servicio_nombre ? `${T.icoServicio} ${d.servicio_nombre}\\n` : '') +\n        `${T.icoPro} ${quien}\\n📅 ${fmtFecha(d.inicio)}\\n🕐 ${fmtHora(d.inicio)}\\n\\n¿Confirmamos?`),\n        [['conf_si', 'Confirmar ✅'], ['conf_cambiar', 'Cambiar fecha']]));\n      paso = 'confirmar'; datos = d;\n      break;\n    }\n\n    case 'crear_cita':\n    case 'reprogramar_cita':\n      if (ok && filas[0]) {\n        const c = filas[0];\n        const titulo = r.accion === 'crear_cita' ? '✅ *¡Cita confirmada!*' : '✅ *¡Cita reprogramada!*';\n        // Menos de 24 h: no prometer un recordatorio \"un día antes\"\n        const horasFaltan = dt(c.inicio).diff(DateTime.now().setZone(tz), 'hours').hours;\n        const cierre = horasFaltan < 24\n          ? `${T.despedida} Escribe *Hola* si necesitas algo más.`\n          : 'Te enviaremos un recordatorio un día antes. Escribe *Hola* si necesitas algo más.';\n        mensajes.push(texto(\n          `${titulo}\\n\\n${T.icoServicio} ${c.servicio}\\n${T.icoPro} Con ${c.profesional}\\n📅 ${fmtFecha(c.inicio)}\\n` +\n          `🕐 ${fmtHora(c.inicio)}\\n💰 ${pesos(c.precio)}\\n📍 ${ctx.salon_nombre}\\n\\n${cierre}`));\n      } else if (error === 'HORARIO_NO_DISPONIBLE') {\n        delete d.inicio;\n        mensajes.push(botones(`😕 Esa hora se acaba de ocupar.\\n\\n¿Qué franja prefieres para el *${d.fecha_texto}*?`, opcFranja(d.fecha)));\n        paso = 'franja'; datos = d;\n      } else {\n        mensajes.push(texto(ERROR_GENERICO));\n      }\n      break;\n\n    case 'mis_citas':\n      if (!filas.length) {\n        mensajes.push(botones('No tienes citas próximas 📭\\n\\n¿Qué quieres hacer?', OPC_MENU));\n        paso = 'menu';\n      } else {\n        mensajes.push(lista(conAviso('Estas son tus próximas citas. Elige una para reprogramar o cancelar 👇'), 'Ver citas',\n          filas.map(c => ({\n            id: `cita:${c.cita_id}|${c.servicio_id}|${c.profesional_id}`,\n            title: cap(dt(c.inicio).toFormat('ccc d LLL, h:mm a')),\n            description: `${c.servicio} con ${c.profesional}`,\n          }))));\n        paso = 'cita';\n      }\n      break;\n\n    case 'opciones_cita':\n      mensajes.push(botones(conAviso(`Tu cita: *${d.cita_texto}*\\n\\n¿Qué quieres hacer?`),\n        [['cita_reprog', 'Reprogramar'], ['cita_cancel', 'Cancelar cita'], ['volver', 'Volver']]));\n      paso = 'cita_opcion'; datos = d;\n      break;\n\n    case 'confirmar_cancelacion':\n      mensajes.push(botones(conAviso(`¿Seguro que quieres cancelar tu cita${d.cita_texto ? ' del *' + d.cita_texto + '*' : ''}?`),\n        [['cancel_si', 'Sí, cancelar'], ['cancel_no', 'No, mantenerla']]));\n      paso = 'cancelar'; datos = d;\n      break;\n\n    case 'cancelar_cita':\n      mensajes.push(texto(ok\n        ? '✅ Tu cita fue cancelada.\\n\\nEscribe *Hola* si quieres agendar otra.'\n        : 'No encontramos esa cita o ya no se puede cancelar. Escribe *Hola* para volver al menú.'));\n      break;\n\n    case 'confirmar_asistencia':\n      mensajes.push(texto(ok\n        ? '¡Gracias por confirmar! ✅ Te esperamos.'\n        : 'No encontramos esa cita o ya pasó. Escribe *Hola* para volver al menú.'));\n      break;\n\n    case 'seg_no':\n      mensajes.push(texto('Listo 👍 Cuando quieras agendar, escríbenos *Hola*.'));\n      break;\n\n    case 'humano':\n      mensajes.push(texto(`Listo 🙌 Una persona del ${T.lugar} te escribirá por aquí en breve.`));\n      if (ctx.telefono_notificaciones) {\n        // Plantilla aprobada: funciona aunque el dueño no haya escrito en 24 h\n        avisos.push({\n          to: ctx.telefono_notificaciones,\n          payload: {\n            type: 'template',\n            template: {\n              name: 'aviso_humano',\n              language: { code: 'es' },\n              components: [{\n                type: 'body',\n                parameters: [\n                  { type: 'text', text: ctx.salon_nombre },       // {{1}}\n                  { type: 'text', text: nombre || 'sin nombre' }, // {{2}}\n                  { type: 'text', text: tel },                    // {{3}}\n                ],\n              }],\n            },\n          },\n        });\n      }\n      break;\n\n    default:\n      mensajes.push(botones(`¿Qué quieres hacer?`, OPC_MENU));\n      paso = 'menu';\n  }\n}\n\n// ---------- Guardar las opciones mostradas (para interpretar audios) ----------\nconst opcionesDe = (p) => {\n  const i = p?.interactive;\n  if (!i) return [];\n  if (i.type === 'button') return i.action.buttons.map(b => ({ id: b.reply.id, title: b.reply.title }));\n  if (i.type === 'list') return i.action.sections.flatMap(s => s.rows.map(f => ({\n    id: f.id, title: f.title, ...(f.description ? { description: f.description } : {}),\n  })));\n  return [];\n};\nconst opciones = opcionesDe(mensajes[mensajes.length - 1]);\nif (opciones.length) datos = { ...datos, opciones };\n\n// ---------- Salida: un item por mensaje ----------\nconst item = (to, payload) => ({\n  json: {\n    phone_number_id: r.phone_number_id,\n    to,\n    payload: { messaging_product: 'whatsapp', to, ...payload },\n    telefono_cliente: tel,\n    paso_nuevo: paso,\n    datos_nuevos: datos,\n  },\n});\n\nreturn [\n  ...mensajes.map(p => item(tel, p)),\n  ...avisos.map(a => item(a.to, a.payload)),\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        -160
+      ],
+      "id": "a3b13f63-ec28-47c5-a7ab-23364eb3d1fc",
+      "name": "Construir respuesta"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v23.0/{{ $json.phone_number_id }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1584,
+        -160
+      ],
+      "id": "da3cdca2-bdb8-40c0-992c-878b16ba60df",
+      "name": "Enviar WhatsApp",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "TU_ID_CREDENCIAL",
+          "name": "TU_CREDENCIAL_META"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://TU_PROYECTO.supabase.co/rest/v1/rpc/bot_guardar_conversacion",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_phone_number_id: $('Construir respuesta').first().json.phone_number_id, p_telefono: $('Construir respuesta').first().json.telefono_cliente, p_paso: $('Construir respuesta').first().json.paso_nuevo, p_datos: $('Construir respuesta').first().json.datos_nuevos }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1808,
+        -160
+      ],
+      "id": "0c4713b0-bc49-41f9-a25b-8356c8593a57",
+      "name": "Guardar conversación",
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "TU_ID_CREDENCIAL",
+          "name": "TU_CREDENCIAL_SUPABASE"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "5aaaf905-65e8-49a7-9950-02d0e6fce579",
+              "leftValue": "={{ $('Normalizar').item.json.tipo === 'audio' && !!$('Contexto').item.json.autorizo_datos && ($('Contexto').item.json.datos?.opciones?.length ?? 0) > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        496,
+        112
+      ],
+      "id": "12035641-f7cc-4b79-8c41-9a012c921ecf",
+      "name": "¿Es audio?"
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.facebook.com/v23.0/{{ $('Normalizar').item.json.audio_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        688,
+        256
+      ],
+      "id": "b96cae82-7054-4ccd-95ce-ab34983c1f2d",
+      "name": "Info del audio",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "TU_ID_CREDENCIAL",
+          "name": "TU_CREDENCIAL_META"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "58c5e1a1-bf79-4985-b74d-1c32f9053f01",
+              "leftValue": "={{ Number($json.file_size) <= 300000 }}",
+              "rightValue": 300000,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        912,
+        256
+      ],
+      "id": "51b7a810-515a-4e8d-9e43-a0f9b200c087",
+      "name": "¿Audio corto?"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1136,
+        160
+      ],
+      "id": "ee29604f-8eb2-4878-a0c3-87b5946f7d91",
+      "name": "Descargar audio",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "TU_ID_CREDENCIAL",
+          "name": "TU_CREDENCIAL_META"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/audio/transcriptions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "model",
+              "value": "openai/gpt-4o-mini-transcribe"
+            },
+            {
+              "name": "language",
+              "value": "es"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1360,
+        160
+      ],
+      "id": "d3a19330-d548-4185-a18c-9bafce4b4e55",
+      "name": "Transcribir",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "TU_ID_CREDENCIAL",
+          "name": "TU_CREDENCIAL_OPENROUTER"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'openai/gpt-4o-mini',\n  temperature: 0,\n  response_format: { type: 'json_object' },\n  messages: [\n    {\n      role: 'system',\n      content: 'Eres el asistente de un negocio que agenda citas en Colombia. El cliente respondió con una nota de voz ' +\n        'a una lista de opciones numeradas. Devuelve el número de la opción que corresponde a lo que dijo. ' +\n        'Las horas están en formato de 12 horas: \"a las tres\" o \"las 3\" es 3:00 p. m. si en la lista solo hay horas de la tarde; ' +\n        '\"tres y media\" es 3:30; \"al mediodía\" es 12:00 p. m. Si pide una hora que no está en la lista, devuelve 0. ' +\n        'Responde solo JSON: {\"opcion\": <número>} o {\"opcion\": 0} si no corresponde claramente a ninguna. Hoy es ' +\n        $now.setZone($('Contexto').item.json.zona_horaria || 'America/Bogota').setLocale('es').toFormat(\"cccc d 'de' LLLL\") + '.'\n    },\n    {\n      role: 'user',\n      content: 'Opciones:\\n' +\n        $('Contexto').item.json.datos.opciones.map((o, i) => (i + 1) + '. ' + o.title + (o.description ? ' (' + o.description + ')' : '')).join('\\n') +\n        '\\n\\nEl cliente dijo: \"' + ($json.text || '') + '\"'\n    }\n  ]\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1536,
+        160
+      ],
+      "id": "efbe5e0c-7948-4ab5-a10b-845841862cb2",
+      "name": "Elegir opción",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "TU_ID_CREDENCIAL",
+          "name": "TU_CREDENCIAL_OPENROUTER"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// INTERPRETAR AUDIO: convierte el número elegido por el modelo en una respuesta\n// igual a la de un botón. Valida que el número exista en las opciones mostradas.\nconst ctx = $('Contexto').first().json;\nconst opciones = ctx.datos?.opciones ?? [];\n\nlet respuesta_id = null;\nlet texto = '';\nlet motivo = null;\nlet transcripcion = '';\n\nif (!$('Descargar audio').isExecuted) {\n  // Salió por la rama \"audio largo\"\n  motivo = 'largo';\n} else {\n  transcripcion = $('Transcribir').isExecuted ? ($('Transcribir').first().json.text ?? '') : '';\n  let numero = 0;\n  try {\n    const raw = $('Elegir opción').first().json.choices?.[0]?.message?.content ?? '';\n    numero = Number(JSON.parse(raw).opcion) || 0;\n  } catch (e) {}\n  const op = numero >= 1 && numero <= opciones.length ? opciones[numero - 1] : null;\n  if (op) {\n    respuesta_id = op.id;\n    texto = op.title;\n  } else {\n    motivo = 'no_entendido';\n  }\n}\n\nreturn [{ json: { respuesta_id, texto, motivo, transcripcion } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1872,
+        272
+      ],
+      "id": "2965fe32-7ea1-42d5-bba2-c98a9f577670",
+      "name": "Interpretar audio"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://TU_PROYECTO.supabase.co/rest/v1/rpc/bot_registrar_mensaje",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_mensaje_id\": \"{{ $('Normalizar').item.json.mensaje_id }}\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -832,
+        -64
+      ],
+      "id": "f790d28c-294d-4c3f-92a8-8f72fc615a29",
+      "name": "Registrar mensaje",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "TU_ID_CREDENCIAL",
+          "name": "TU_CREDENCIAL_SUPABASE"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "eac9b447-1bde-4da8-bfc3-7203c87e869b",
+              "leftValue": "={{ $json.nuevo !== false }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -608,
+        -64
+      ],
+      "id": "f9a48256-4b78-4c88-afb8-3a29315775cd",
+      "name": "¿Mensaje nuevo?"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: $('Normalizar').first().json }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -368,
+        -80
+      ],
+      "id": "f5cf7144-05f4-49c0-83f0-79cb5f3282d2",
+      "name": "Seguir"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "e67d0156-adcd-4316-945d-52faa1419049",
+              "leftValue": "={{ $json.salon_activo !== false }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        96,
+        -80
+      ],
+      "id": "517c5a4e-2ae0-4c1c-a3c4-82fdb29a2e13",
+      "name": "¿Salón activo?"
+    }
+  ],
+  "connections": {
+    "Salones - Bot": {
+      "main": [
+        [
+          {
+            "node": "Normalizar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizar": {
+      "main": [
+        [
+          {
+            "node": "Registrar mensaje",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contexto": {
+      "main": [
+        [
+          {
+            "node": "¿Salón activo?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Bot pausado?": {
+      "main": [
+        [],
+        [
+          {
+            "node": "¿Es audio?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Router": {
+      "main": [
+        [
+          {
+            "node": "¿Necesita datos?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Necesita datos?": {
+      "main": [
+        [
+          {
+            "node": "Llamar Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Construir respuesta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Llamar Supabase": {
+      "main": [
+        [
+          {
+            "node": "Construir respuesta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Construir respuesta": {
+      "main": [
+        [
+          {
+            "node": "Enviar WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Guardar conversación",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Es audio?": {
+      "main": [
+        [
+          {
+            "node": "Info del audio",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Info del audio": {
+      "main": [
+        [
+          {
+            "node": "¿Audio corto?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Audio corto?": {
+      "main": [
+        [
+          {
+            "node": "Descargar audio",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Interpretar audio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Descargar audio": {
+      "main": [
+        [
+          {
+            "node": "Transcribir",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transcribir": {
+      "main": [
+        [
+          {
+            "node": "Elegir opción",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Elegir opción": {
+      "main": [
+        [
+          {
+            "node": "Interpretar audio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Interpretar audio": {
+      "main": [
+        [
+          {
+            "node": "Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar mensaje": {
+      "main": [
+        [
+          {
+            "node": "¿Mensaje nuevo?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Mensaje nuevo?": {
+      "main": [
+        [
+          {
+            "node": "Seguir",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Seguir": {
+      "main": [
+        [
+          {
+            "node": "Contexto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Salón activo?": {
+      "main": [
+        [
+          {
+            "node": "¿Bot pausado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "tags": []
+}
